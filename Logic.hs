@@ -50,13 +50,18 @@ fwdApplyRule (ant :=> Pred name args) =
   lhsCheck ant >> (put $ DM.singleton name args) 
      
 fwdInferring :: [Rule] -> MaybeT WorkMem ()
-fwdInferring = msum . map fwdApplyRule -- laziness is great !!!
+fwdInferring rs = do msum $ map fwdApplyRule rs
+                     fwdInferring rs
      
 runFwdInferring :: [Pred] -> [Rule] -> [Pred]
 runFwdInferring ps rs = fromMem $ snd $ runState (runMaybeT (fwdInferring rs)) mem
   where
     mem = DM.fromList $ map (\ (Pred name args) -> (name, args)) ps
     fromMem = map (\ (name, args) -> Pred name args) . DM.toList
+    
+-- bottom-up inferring
+
+
 -------------------------------
 
 mem = DM.insert "IsHuge" [Const "MyHouse"] $ DM.singleton "HasPony" [Const "Tony"]
@@ -79,8 +84,18 @@ exp4 = runState (
             lhsCheck (
               Or (Atom (Pred "IsHuge" [Const "MyHouse"])) (Atom (Pred "IsHuge" [Const "MyHouse"]))))) mem
 
-preds = [Pred "IsHuge" [Const "MyHouse"]
-        ,Pred "HasPony" [Const "Tony"]]
+preds = [Pred "IsHuge" [Const "Apple"]
+        ,Pred "IsTasty" [Const "Apple"]
+        ,Pred "SawApple" [Const "Person"]
+        ,Pred "IsDirty" [Const "Banana"]
+        ,Pred "SawBanana" [Const "Person"]
+        ,Pred "IsCheaper" [Const "Banana", Const "Apple"]]
         
-rules = [Atom (Pred "IsHuge" [Const "MyHouse"]) :=> Pred "GreatHouse" [Const "MyHouse"]]
+rules = [Atom (Pred "SawApple" [Const "Person"]) :=> Pred "PickedApple" [Const "Person"]
+        ,Atom (Pred "SawBanana" [Const "Person"]) :=> Pred "PickedBanana" [Const "Person"]
+        ,And
+          (Atom (Pred "SawApple" [Const "Person"]))
+          (And
+            (Atom (Pred "SawBanana" [Const "Person"]))
+            (Atom (Pred "IsDirty" [Const "Banana"]))) :=> Pred "PickedApple" [Const "Person"] ]
 
