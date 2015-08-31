@@ -13,6 +13,7 @@ data Term = Const String | Var String
   deriving (Eq, Show)
 
 data Pred = Pred String [Term]
+  deriving Show
 
 data Formula = Atom Pred | And Formula Formula | Or Formula Formula
 
@@ -28,9 +29,9 @@ type WorkMem = State PredMap
 
 deleteElem _ _ = Nothing
        
-fwdInfer :: Formula -> MaybeT WorkMem ()
+lhsCheck :: Formula -> MaybeT WorkMem ()
 
-fwdInfer (Atom (Pred name args)) =
+lhsCheck (Atom (Pred name args)) =
   do (mArgs, mem') <- fmap (DM.updateLookupWithKey deleteElem name) get
      guard (isJust mArgs)
      let args' = fromJust mArgs
@@ -38,32 +39,48 @@ fwdInfer (Atom (Pred name args)) =
      put mem'
      return ()
 
-fwdInfer (And a b) =
-  fwdInfer a >> fwdInfer b
+lhsCheck (And a b) =
+  lhsCheck a >> lhsCheck b
   
-fwdInfer (Or a b) =
-  fwdInfer a `mplus` fwdInfer b
+lhsCheck (Or a b) =
+  lhsCheck a `mplus` lhsCheck b
+
+fwdApplyRule :: Rule -> MaybeT WorkMem ()
+fwdApplyRule (ant :=> Pred name args) =
+  lhsCheck ant >> (put $ DM.singleton name args) 
      
+fwdInferring :: [Rule] -> MaybeT WorkMem ()
+fwdInferring = msum . map fwdApplyRule -- laziness is great !!!
+     
+runFwdInferring :: [Pred] -> [Rule] -> [Pred]
+runFwdInferring ps rs = fromMem $ snd $ runState (runMaybeT (fwdInferring rs)) mem
+  where
+    mem = DM.fromList $ map (\ (Pred name args) -> (name, args)) ps
+    fromMem = map (\ (name, args) -> Pred name args) . DM.toList
 -------------------------------
 
 mem = DM.insert "IsHuge" [Const "MyHouse"] $ DM.singleton "HasPony" [Const "Tony"]
 
-exp1 = runState (runMaybeT (fwdInfer (Atom (Pred "IsHuge" [Const "MyHouse"])))) mem
+exp1 = runState (runMaybeT (lhsCheck (Atom (Pred "IsHuge" [Const "MyHouse"])))) mem
 
 -- can't use twice check
 exp2 = runState (
           runMaybeT (
-            fwdInfer (
+            lhsCheck (
               And (Atom (Pred "IsHuge" [Const "MyHouse"])) (Atom (Pred "IsHuge" [Const "MyHouse"]))))) mem
 
 exp3 = runState (
           runMaybeT (
-            fwdInfer (
+            lhsCheck (
               And (Atom (Pred "IsHuge" [Const "MyHouse"])) (Atom (Pred "HasPony" [Const "Tony"]))))) mem
 
 exp4 = runState (
           runMaybeT (
-            fwdInfer (
+            lhsCheck (
               Or (Atom (Pred "IsHuge" [Const "MyHouse"])) (Atom (Pred "IsHuge" [Const "MyHouse"]))))) mem
 
+preds = [Pred "IsHuge" [Const "MyHouse"]
+        ,Pred "HasPony" [Const "Tony"]]
+        
+rules = [Atom (Pred "IsHuge" [Const "MyHouse"]) :=> Pred "GreatHouse" [Const "MyHouse"]]
 
