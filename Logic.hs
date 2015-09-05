@@ -59,8 +59,7 @@ runFwdInferring ps rs = fromMem $ snd $ runState (runMaybeT (fwdInferring rs)) m
     mem = DM.fromList $ map (\ (Pred name args) -> (name, args)) ps
     fromMem = map (\ (name, args) -> Pred name args) . DM.toList
     
--- bottom-up inferring
-
+    
 
 -------------------------------
 
