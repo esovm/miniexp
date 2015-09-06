@@ -1,3 +1,4 @@
+{-# LANGUAGE GADTs #-}
 
 import qualified Data.Set as DS 
 import qualified Data.Map as DM
@@ -9,92 +10,42 @@ import Data.Maybe
 
 
 
-data Term = Const String | Var String
-  deriving (Eq, Show)
+type Object = String
+  
+data Fact = Fact String [Object]
+  deriving (Eq, Ord, Show)
 
-data Pred = Pred String [Term]
-  deriving Show
+fact2atom :: Fact -> Formula
+fact2atom (Fact x y) = Atom x y
 
-data Formula = Atom Pred | And Formula Formula | Or Formula Formula
-
-
+data Formula = Atom String [Object] | And Formula Formula | Or Formula Formula
+  deriving (Eq, Ord, Show)
 
 type Antecedent = Formula
-type Succedent  = Pred
+type Succedent  = Fact
 data Rule = Antecedent :=> Succedent
-
-
-type PredMap = DM.Map String [Term]
-type WorkMem = State PredMap
-
-deleteElem _ _ = Nothing
-       
-lhsCheck :: Formula -> MaybeT WorkMem ()
-
-lhsCheck (Atom (Pred name args)) =
-  do (mArgs, mem') <- fmap (DM.updateLookupWithKey deleteElem name) get
-     guard (isJust mArgs)
-     let args' = fromJust mArgs
-     guard (args == args')
-     put mem'
-     return ()
-
-lhsCheck (And a b) =
-  lhsCheck a >> lhsCheck b
+  deriving (Eq, Ord)
   
-lhsCheck (Or a b) =
-  lhsCheck a `mplus` lhsCheck b
+ruleAnt (ant :=> _) = ant
+ruleSuc (_ :=> suc) = suc
 
-fwdApplyRule :: Rule -> MaybeT WorkMem ()
-fwdApplyRule (ant :=> Pred name args) =
-  lhsCheck ant >> (put $ DM.singleton name args) 
-     
-fwdInferring :: [Rule] -> MaybeT WorkMem ()
-fwdInferring rs = do msum $ map fwdApplyRule rs
-                     fwdInferring rs
-     
-runFwdInferring :: [Pred] -> [Rule] -> [Pred]
-runFwdInferring ps rs = fromMem $ snd $ runState (runMaybeT (fwdInferring rs)) mem
+formula2facts :: Formula -> [Fact]
+formula2facts (Atom name args) = [Fact name args]
+formula2facts (And a b) = [a, b] >>= formula2facts
+formula2facts (Or  a b) = [a, b] >>= formula2facts
+
+
+type Fact2Rules = DM.Map Fact [Rule]
+
+addRule :: Rule -> Fact2Rules -> Fact2Rules
+addRule r f2r = insertKeyNodes f2r [r] $ formula2facts $ ruleAnt r 
+  where  
+    insertKeyNodes m v = foldl (\ m k -> DM.insertWith (++) k v m) m
+
+relatedRules :: Fact2Rules -> [Fact] -> [Rule]
+relatedRules f2r = catMaybes . map (lookupRule f2r) 
   where
-    mem = DM.fromList $ map (\ (Pred name args) -> (name, args)) ps
-    fromMem = map (\ (name, args) -> Pred name args) . DM.toList
-    
-    
+    lookupRule m f = fmap head $ DM.lookup f m
 
--------------------------------
 
-mem = DM.insert "IsHuge" [Const "MyHouse"] $ DM.singleton "HasPony" [Const "Tony"]
-
-exp1 = runState (runMaybeT (lhsCheck (Atom (Pred "IsHuge" [Const "MyHouse"])))) mem
-
--- can't use twice check
-exp2 = runState (
-          runMaybeT (
-            lhsCheck (
-              And (Atom (Pred "IsHuge" [Const "MyHouse"])) (Atom (Pred "IsHuge" [Const "MyHouse"]))))) mem
-
-exp3 = runState (
-          runMaybeT (
-            lhsCheck (
-              And (Atom (Pred "IsHuge" [Const "MyHouse"])) (Atom (Pred "HasPony" [Const "Tony"]))))) mem
-
-exp4 = runState (
-          runMaybeT (
-            lhsCheck (
-              Or (Atom (Pred "IsHuge" [Const "MyHouse"])) (Atom (Pred "IsHuge" [Const "MyHouse"]))))) mem
-
-preds = [Pred "IsHuge" [Const "Apple"]
-        ,Pred "IsTasty" [Const "Apple"]
-        ,Pred "SawApple" [Const "Person"]
-        ,Pred "IsDirty" [Const "Banana"]
-        ,Pred "SawBanana" [Const "Person"]
-        ,Pred "IsCheaper" [Const "Banana", Const "Apple"]]
-        
-rules = [Atom (Pred "SawApple" [Const "Person"]) :=> Pred "PickedApple" [Const "Person"]
-        ,Atom (Pred "SawBanana" [Const "Person"]) :=> Pred "PickedBanana" [Const "Person"]
-        ,And
-          (Atom (Pred "SawApple" [Const "Person"]))
-          (And
-            (Atom (Pred "SawBanana" [Const "Person"]))
-            (Atom (Pred "IsDirty" [Const "Banana"]))) :=> Pred "PickedApple" [Const "Person"] ]
 
