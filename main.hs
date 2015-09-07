@@ -1,3 +1,5 @@
+
+-- This modules will be necessery later --
 import qualified Data.Map as DM
 import qualified Data.Set as DS
 import qualified Data.Vector as DV
@@ -9,219 +11,215 @@ import Data.Ord
 import Debug.Trace
 
 import Control.Monad.State
+import Control.Monad.Trans
 
-{- Basics -}
+import Control.Applicative
+-- -- -- -- -- -- -- -- -- -- -- -- -- --*
 
--- fact
+{-
+
+  Best recomendation for any project and for this one
+  especially:
+  
+    KEEP IT SIMPLE STUPID
+
+                        ~ KISS
+
+-}
+
+{-
+  Facts are just strings.
+-}
 newtype Fact = Fact String
   deriving (Eq, Ord, Show)
 
--- production's LHS
-newtype LHS = LHS { lhs2facts :: [Fact] }
-  deriving Show
-
--- production's RHS
-newtype Assertion = Assert [Fact]
-  deriving Show
-data ExtAction = Continue | Exit
-  deriving Show
-data RHS = RHS Assertion ExtAction
-  deriving Show
-
--- production
-data Prod = LHS :=> RHS
-  deriving Show
-
-prodLHS :: Prod -> LHS
-prodLHS (lhs :=> _) = lhs
-
-prodRHS :: Prod -> RHS
-prodRHS (_ :=> rhs) = rhs
-
-
-{- Working Memory -}
-
--- fact recency value
-type Recency = Int
-type Fact2Recency = DM.Map Fact Recency
-
-data WorkMem =
-  WorkMem { wmFact2Recency :: Fact2Recency
-          , wmCurrRecency  :: Recency }
-
--- checks whether there are a facts in working memory
-hasFacts :: WorkMem -> [Fact] -> Bool
-hasFacts wm = all (flip DM.member $ wmFact2Recency wm)
-
--- executes assertion
-execAssertion :: Assertion -> WorkMem -> WorkMem
-execAssertion (Assert []) wm              = wm
-execAssertion (Assert fs) (WorkMem fr cr) =
-  let fr' = foldl (\ fr f -> DM.insert f cr fr) fr fs
-    in WorkMem fr' (cr + 1)
-    
--- returns all facts
-getFacts :: WorkMem -> [Fact]
-getFacts = map fst . DM.toList . wmFact2Recency
-    
--- returns fact's recency
-getFactRecency :: WorkMem -> Fact -> Recency
-getFactRecency wm f = (wmFact2Recency wm) DM.! f
-
--- removes facts from working memory
-removeFacts :: WorkMem -> [Fact] -> WorkMem
-removeFacts wm fs =
-  let f2r = foldl (\ f2r f -> DM.delete f f2r) (wmFact2Recency wm) fs
-    in WorkMem f2r $ wmCurrRecency wm
-    
-cleanWorkMem :: WorkMem -> WorkMem
-cleanWorkMem wm =
-  let fs' = DM.fromList $ map (\ f -> (f, 0)) $ getFacts wm
-    in WorkMem fs' 1
-    
-{- Productions Data -}
-
-type Concr = Int
-type Prio  = Int
-type ProdConcr = DV.Vector Concr
-type ProdPrio  = DV.Vector Prio
-
-type ProdVec = DV.Vector Prod
-
-type ProdId = Int
-type Fact2ProdId = DM.Map Fact ProdId 
-
-data ProdData =
-  ProdData { pdProdConcr   :: ProdConcr
-           , pdProdPrio    :: ProdPrio
-           , pdProdVec     :: ProdVec
-           , pdFact2ProdId :: Fact2ProdId }
-           
-id2prod :: ProdData -> ProdId -> Prod
-id2prod pd pId = (pdProdVec pd) DV.! pId 
-           
-type ProdUsed = DS.Set ProdId
-
--- returns id's of active productions which may (possibly) fire
--- (production must not be used)
-activeProdIDs :: WorkMem -> ProdData -> ProdUsed ->  [ProdId]
-activeProdIDs wm pd pu =
-  filter (not . flip DS.member pu) $
-    nub $ catMaybes $ map (flip DM.lookup f2p) $ getFacts wm
-  where
-    f2p = pdFact2ProdId pd
-
--- extracts conflict set from active productions ids
-getConflictSet :: WorkMem -> ProdData -> [ProdId] -> [ProdId]
-getConflictSet wm pd =
-  filter (hasFacts wm . lhs2facts . prodLHS . id2prod pd)
+{-
+  Rules are of type:
   
--- returns recency of production 
-getProdRecency :: WorkMem -> Prod -> Recency
-getProdRecency wm = sum . map (getFactRecency wm) . lhs2facts . prodLHS
+    if A & B ... & C then D.
+-}
+data Rule = [Fact] :=> Fact
+  deriving (Eq, Ord, Show)
+  
+-- condition
+ruleCondt :: Rule -> [Fact]
+ruleCondt (condt :=> _) = condt
 
--- returns recency of production by it's id
-id2recency :: WorkMem -> ProdData -> ProdId -> Recency
-id2recency wm pd pId = wm `getProdRecency` (pd `id2prod` pId)
+-- conclusion
+ruleConcl :: Rule -> Fact
+ruleConcl (_ :=> concl) = concl
 
--- returns priority of production by it's id
-id2prio :: ProdData -> ProdId -> Prio
-id2prio pd pId = (pdProdPrio pd) DV.! pId
+{-
+  Forward inferrence mechanic:
+  
+    1) If there is a fact in working memory,
+    then it's true fact.
+  
+    2) Once rule was apllied, it's conditions
+    are removed from working memory.
 
--- returns concreteness of production by it's id
-id2concr :: ProdData -> ProdId -> Concr
-id2concr pd pId = (pdProdConcr pd) DV.! pId
+    3) Once rule was applied, it's conclusion
+    is added to working memory.
 
--- Resolves conflict set by getting a production
--- with maximum priority, recency and concreteness.
--- If conflict set is empty, then there is no rules
--- to apply.
-resolveConflictSet :: WorkMem -> ProdData -> [ProdId] -> Maybe ProdId
-resolveConflictSet _ _ [] = Nothing
-resolveConflictSet wm pd ps =
-  Just $ fst $ maximumBy (comparing snd) $
-    map (\ pId -> (pId, getScore pId)) ps 
-  where    
-    getScore pId =
-      let
-        rec = id2recency wm pd pId
-        pri = id2prio pd pId
-        con = id2concr pd pId
-      in rec + pri + con
+    4) If there is no rule to apply, then
+    inferrence terminates.
+    
+    5) Order in which rules are applied is following:
+    most concrete and most recent rules are preffered.
+-}
 
--- Getting production to fire
-getProdToFire :: WorkMem -> ProdData -> ProdUsed -> Maybe ProdId
-getProdToFire wm pd pu =
-    resolveConflictSet wm pd $ getConflictSet wm pd $ activeProdIDs wm pd pu 
-
-
-{- Stateful part -}
-
--- state of execution
-type ExecState = State (WorkMem, ProdData, ProdUsed)
-
-data ExecResult = Failure | Success
+-- Concreteness
+newtype Concr = Concr Int
   deriving Show
 
-fwdExecStep :: ExecState ExecResult
-fwdExecStep = traceShow "ff" $ do (wm, pd, pu) <- get
-                                  case getProdToFire wm pd pu of
-                                     Nothing -> return Failure
-                                     Just p  -> do ext <- fireProd p
-                                                   case ext of
-                                                     Exit     -> return Success
-                                                     Continue -> cleanData >> fwdExecStep
+ruleConcr :: Rule -> Concr
+ruleConcr (cond :=> _) = Concr $ length cond
 
-fireProd :: ProdId -> ExecState ExtAction
-fireProd pId = do (wm, pd, pu) <- get
-                  let (lhs :=> rhs) = id2prod pd pId
-                      pu'           = DS.insert pId pu 
-                      wm'           = removeFacts wm $ lhs2facts lhs
-                  put (wm', pd, pu')
-                  execRHS rhs                    
+{-
+  
+  Inferrence Engine.
 
-execRHS :: RHS -> ExecState ExtAction
-execRHS (RHS a e) = do (wm, pd, pu) <- get
-                       let wm' = execAssertion a wm
-                       return e
+  In order to avoid trying to apply all rules available
+  we may try rules which conditions are partially or
+  fully contains in working memory.
+-}
 
-cleanData :: ExecState ()
-cleanData = do (wm, pd, pu) <- get
-               let wm' = cleanWorkMem wm
-               put (wm', pd, DS.empty)
+newtype RuleId = RuleId Int
+  deriving (Eq, Ord, Show)
+
+data Engine =
+  Engine { engId2Rule  :: DV.Vector Rule
+         , engId2Concr :: DV.Vector Concr
+         , engFact2Ids :: DM.Map Fact (DS.Set RuleId)
+         , engRule2Id  :: DM.Map Rule RuleId }
+
+--
+id2Rule :: Engine -> RuleId -> Rule
+id2Rule eng rId = (engId2Rule eng) DV.! rId
+
+--
+id2Concr :: Engine -> RuleId -> Concr
+id2Concr eng rId = (engId2Concr eng) DV.! rId
+
+--
+fact2ids :: Engine -> Fact -> DS.Set RuleId
+fact2ids eng f = (engFact2Ids eng) DM.! f
+
+lookupIdsByFact :: Engine -> Fact -> Maybe (DS.Set RuleId)
+lookupIdsByFact eng f = DM.lookup f (engFact2Ids eng)
+
+--
+rule2id :: Engine -> Rule -> RuleId
+rule2id eng rId = (engRule2Id eng) DM.! rId
+
+initEngine :: [Rule] -> Engine
+initEngine rs = let
+  size = length rs
+  i2r  = DV.fromListN size rs
+  i2c  = DV.fromListN size $ map ruleConcr rs
+  f2is = initFact2Ids
+  r2i  = DM.fromList idxRs
+  in Engine i2r i2c f2is r2i
+  where
     
-runFwd :: [Fact] -> [(Prod, Prio)] -> ([Fact], ExecResult)
-runFwd fs ps =
-  let f2r   = foldl (\ f2r f -> DM.insert f 0 f2r) DM.empty fs
-      wm    = WorkMem f2r 1
-      pVec  = DV.fromList $ map fst ps
-      prios = DV.fromList $ map snd ps
-      n     = length ps
-      pcons = DV.generate n (\ id -> length $ lhs2facts $ prodLHS $ pVec DV.! id)
-      f2pid = foldl (\ f2pid (fs, pid) ->
-                foldl (\ f2pid f -> DM.insert f pid f2pid) f2pid fs) DM.empty $
-                  map (\ id -> (lhs2facts $ prodLHS $ pVec DV.! id, id)) [1..n]
-      pd    = ProdData pcons prios pVec f2pid
-      in case runState fwdExecStep (wm, pd, DS.empty) of
-           (r, (wm', _, _)) -> (getFacts wm', r)
-
+    idxRs = zip rs [0..] 
+    
+    initFact2Ids =
+      let idxFs = map (\ (r, i) -> (ruleCondt r, i)) idxRs
+        in foldl insertCondt DM.empty idxFs
+        where
+          insertCondt f2is (condt, id) =
+            let idS = DS.singleton id in
+              foldl (\ f2is f -> DM.insertWith DS.union f idS f2is) f2is condt 
+       
+printEngine :: Engine -> IO ()
+printEngine (Engine i2r i2c f2is r2i) =
+  do putStrLn "Inferrence engine\n"
+     putStrLn ("Rules:\n" ++ show i2r)
+     putStrLn ("Rule's concretenesses:\n" ++ show i2c)
+     putStrLn ("Facts and related rules (by id):\n" ++ show f2is)
+     putStrLn ("Rule's ids:\n" ++ show r2i) 
         
-{- Forward inferring examples -}
+{- Working memory -}
 
-allFacts  = [Fact "Animal is dead"
-            ,Fact "Animal is alive"
-            ,Fact "Object is animal"
-            ,Fact "Object is human"
-            ,Fact "Human is alive"
-            ,Fact "Human is dead"
-            ,Fact "Object can talk" ]
-            
-allProds = [LHS [Fact "Object can talk"] :=> RHS (Assert [Fact "Object is human"]) Continue]
+-- Recency
+newtype Recency = Recency Int
+  deriving Show
 
-facts = [Fact "Object can talk"]
-prods = zeroPrio allProds
+-- Working memory
+newtype WorkMem =
+  WorkMem { wmFact2Recency :: DM.Map Fact Recency }
+  
+printWorkMem :: WorkMem -> IO ()
+printWorkMem (WorkMem f2r) =
+  do putStrLn "Woorking Memory:"
+     putStrLn ("Facts and their recency:\n" ++ show f2r)
+  
+initWorkMem :: [Fact] -> WorkMem
+initWorkMem fs = WorkMem $ DM.fromList $ zip fs $ repeat $ Recency 0
 
-zeroPrio = map (\ p -> (p, 0))
+-- Working memory's facts
+workMemFacts :: WorkMem -> [Fact]
+workMemFacts = map fst . DM.toList . wmFact2Recency
 
-runExpl = runFwd facts prods
+-- Recency of fact
+factRecency :: WorkMem -> Fact -> Recency
+factRecency (WorkMem f2r) f = f2r DM.! f
 
+lookupRecency :: WorkMem -> Fact -> Maybe Recency
+lookupRecency (WorkMem f2r) f = DM.lookup f f2r
+
+-- Recency of rule (by it's id)
+ruleRecency :: WorkMem -> Engine -> RuleId -> Recency
+ruleRecency wm eng rId = combine $
+  catMaybes $ map (lookupRecency wm) $ ruleCondt $ id2Rule eng rId
+  where
+    combine = Recency . sum . map (\ (Recency r) -> r)
+    
+-- Retrieves set of rules (by ids) related to current
+-- working memory state.
+--relatedRules :: WorkMem -> Engine -> DS.Set RuleId
+relatedRules wm eng = DS.unions $ catMaybes $
+  workMemFacts wm >>= pure . lookupIdsByFact eng
+  
+-- Sorts rules in descending order by comparing
+-- a sum of rule's recency and concreteness.
+-- Most concrete and recent rule comes first.
+sortRules :: WorkMem -> Engine -> [RuleId] -> [RuleId]
+sortRules wm eng = sortDesc . map getScore
+  where
+ 
+    sortDesc = sortBy (flip compare)
+ 
+    getScore id = sum $ [toInt . id2Concr eng, toInt . ruleRecency wm eng] <*> [id]
+    
+    
+    
+    
+--------------------------------------------------------------
+
+class IntLike n where
+  toInt :: n -> Int
+  
+instance IntLike Recency where
+  toInt (Recency r) = r
+  
+instance IntLike Concr where
+  toInt (Concr c) = c
+  
+instance IntLike RuleId where
+  toInt (RuleId id) = id
+  
+
+{- Examples -}
+    
+exmRules =
+  [ [Fact "Animal has tail", Fact "Animal says Meow"] :=> Fact "Animal is cat"
+  , [Fact "Animal like lizard", Fact "Animal is big"] :=> Fact "Animal is aligator"
+  , [Fact "Object can talk"] :=> Fact "Object is human"
+  , [Fact "Object can talk", Fact "Animal says Meow"] :=> Fact "Strange"]
+  
+exmFacts = [Fact "Object can talk"]
+
+exmWM  = initWorkMem exmFacts
+exmENG = initEngine exmRules
