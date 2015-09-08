@@ -1,5 +1,4 @@
 
--- This modules will be necessery later --
 import qualified Data.Map as DM
 import qualified Data.Set as DS
 import qualified Data.Vector as DV
@@ -10,23 +9,14 @@ import Data.Ord
 
 import Debug.Trace
 
+import Control.Monad
 import Control.Monad.State
 import Control.Monad.Trans.Maybe
 import Control.Monad.Reader
 
 import Control.Applicative
--- -- -- -- -- -- -- -- -- -- -- -- -- --*
+-- -- -- -- -- -- -- -- -- -- -- -- -- --
 
-{-
-
-  Best recomendation for any project and for this one
-  especially:
-  
-    KEEP IT SIMPLE STUPID
-
-                        ~ KISS
-
--}
 
 {-
   Facts are just strings.
@@ -91,8 +81,9 @@ newtype RuleId = RuleId Int
 data Engine =
   Engine { engId2Rule  :: DV.Vector Rule
          , engId2Concr :: DV.Vector Concr
-         , engFact2Ids :: DM.Map Fact (DS.Set RuleId)
-         , engRule2Id  :: DM.Map Rule RuleId }
+         , engCond2Ids :: DM.Map Fact (DS.Set RuleId)  -- which rules has this fact as condition
+         , engRule2Id  :: DM.Map Rule RuleId
+         , engConc2Ids :: DM.Map Fact (DS.Set RuleId) }-- which rules has this fact as conclusion
 
 --
 id2Rule :: Engine -> RuleId -> Rule
@@ -103,11 +94,17 @@ id2Concr :: Engine -> RuleId -> Concr
 id2Concr eng rId = (engId2Concr eng) DV.! (toInt rId)
 
 --
-fact2ids :: Engine -> Fact -> DS.Set RuleId
-fact2ids eng f = (engFact2Ids eng) DM.! f
+cond2ids :: Engine -> Fact -> DS.Set RuleId
+cond2ids eng f = (engCond2Ids eng) DM.! f
 
+--
+
+lookupIdsByGoal :: Engine -> Fact -> Maybe (DS.Set RuleId)
+lookupIdsByGoal eng f = DM.lookup f (engConc2Ids eng)
+
+--
 lookupIdsByFact :: Engine -> Fact -> Maybe (DS.Set RuleId)
-lookupIdsByFact eng f = DM.lookup f (engFact2Ids eng)
+lookupIdsByFact eng f = DM.lookup f (engCond2Ids eng)
 
 --
 rule2id :: Engine -> Rule -> RuleId
@@ -115,17 +112,19 @@ rule2id eng r = (engRule2Id eng) DM.! r
 
 initEngine :: [Rule] -> Engine
 initEngine rs = let
-  size = length rs
-  i2r  = DV.fromListN size rs
-  i2c  = DV.fromListN size $ map ruleConcr rs
-  f2is = initFact2Ids
-  r2i  = DM.fromList idxRs
-  in Engine i2r i2c f2is r2i
+  size   = length rs
+  i2r    = DV.fromListN size rs
+  i2c    = DV.fromListN size $ map ruleConcr rs
+  cnd2is = initCond2Ids
+  r2i    = DM.fromList idxRs
+  cnc2is = initConc2Ids
+  
+  in Engine i2r i2c cnd2is r2i cnc2is
   where
     
     idxRs = zip rs $ map RuleId [0..] 
     
-    initFact2Ids =
+    initCond2Ids =
       let idxFs = map (\ (r, i) -> (ruleCondt r, i)) idxRs
         in foldl insertCondt DM.empty idxFs
         where
@@ -133,24 +132,38 @@ initEngine rs = let
             let idS = DS.singleton id in
               foldl (\ f2is f -> DM.insertWith DS.union f idS f2is) f2is condt 
        
+    initConc2Ids =
+      let idxCs = map (\ (r, i) -> (ruleConcl r, i)) idxRs
+        in foldl (\ c2is (c, i) ->
+              DM.insertWith DS.union c (DS.singleton i) c2is) DM.empty idxCs
+       
 printEngine :: Engine -> IO ()
-printEngine (Engine i2r i2c f2is r2i) =
+printEngine (Engine i2r i2c cnd2is r2i cnc2ids) =
   do putStrLn "Inferrence engine\n"
      putStrLn ("Rules:\n" ++ show i2r)
      putStrLn ("Rule's concretenesses:\n" ++ show i2c)
-     putStrLn ("Facts and related rules (by id):\n" ++ show f2is)
-     putStrLn ("Rule's ids:\n" ++ show r2i) 
+     putStrLn ("Facts and related rules (by id):\n" ++ show cnd2is)
+     putStrLn ("Rule's ids:\n" ++ show r2i)
+     putStrLn ("Goals to rules:\n" ++ show cnc2ids)
         
 {- Working memory -}
 
 -- Recency
 newtype Recency = Recency Int
-  deriving Show
+  deriving (Eq, Ord, Show)
 
 -- Working memory
 newtype WorkMem =
   WorkMem { wmFact2Recency :: DM.Map Fact Recency }
   
+hasFact :: WorkMem -> Fact -> Bool
+hasFact wm = flip DM.member (wmFact2Recency wm)
+
+hasFacts :: WorkMem -> [Fact] -> Bool
+hasFacts wm fs =
+  let fm = DM.fromList $ map (\ f -> (f, Recency 0)) fs
+    in fm `DM.isSubmapOf` wmFact2Recency wm 
+
 initWorkMem :: [Fact] -> WorkMem
 initWorkMem fs = WorkMem $ DM.fromList $ zip fs $ repeat $ Recency 0
 
@@ -174,48 +187,37 @@ ruleRecency wm eng rId = combine $
     
 -- Retrieves set of rules (by ids) related to current
 -- working memory state.
---relatedRules :: WorkMem -> Engine -> DS.Set RuleId
-relatedRules wm eng = DS.unions $ catMaybes $
+activeSet :: WorkMem -> Engine -> DS.Set RuleId
+activeSet wm eng = DS.unions $ catMaybes $
   workMemFacts wm >>= pure . lookupIdsByFact eng
   
-  
-  
--- Sorts rules in descending order by comparing
--- a sum of rule's recency and concreteness.
--- Most concrete and recent rule comes first.
-sortRules :: WorkMem -> Engine -> [RuleId] -> [RuleId]
-sortRules wm eng rIds= map fst $ sortDesc $ zip rIds $ map getScore rIds
-  where 
-  
-    sortDesc = sortBy (flip $ comparing snd)
- 
-    getScore id = sum $
-      [toInt . id2Concr eng, toInt . ruleRecency wm eng] <*> [id]
-    
--- Tries to apply rule (by id). If possible,
--- returns a Working Memory without rule's
--- condition.
-tryApply :: WorkMem -> Engine -> RuleId -> Maybe (RuleId, Rule, WorkMem)
-tryApply (WorkMem f2r) eng rId =
-  let r    = id2Rule eng rId
-      cnd  = ruleCondt r
-      f2rs = removeCnd cnd
-      in case span isJust f2rs of
-           (js, []) -> fmap (\ x -> (rId, r, WorkMem x)) $ head js
-           _        -> Nothing
+-- Makes a conflict set (set of rules which can be applied)
+-- from a given set of rule's ids.
+conflictSet :: WorkMem -> Engine -> DS.Set RuleId -> DS.Set RuleId
+conflictSet wm eng = DS.map fst .
+  DS.filter (hasFacts wm . ruleCondt . snd) .
+    DS.map (\ id -> (id, id2Rule eng id)) 
+
+-- Once we got conflict set, we are sure we can apply any
+-- it's rule. So we can just pick one with higher priority.
+-- Priority here is a sum of rule's recency with rule's
+-- concreteness values.
+getIdToFire :: WorkMem -> Engine -> DS.Set RuleId -> RuleId
+getIdToFire wm eng = getWithMaxPrio
+  {-if DS.null rs
+    then Nothing
+    else Just $ getWithMaxPrio rs 
+  -}
   where
   
-    del _ _ = Nothing
-    
-    removeCnd = scanr (\ f mF2r ->
-                  do f2r <- mF2r
-                     case DM.updateLookupWithKey del f f2r of
-                       (Nothing, _)   -> Nothing
-                       (Just _, f2r') -> return f2r') (Just f2r)
-    
-    
-firstApplicable :: WorkMem -> Engine -> [RuleId] -> Maybe (RuleId, Rule, WorkMem)
-firstApplicable wm eng = msum . map (tryApply wm eng)
+    getPrio id = sum $ [concr, recen] <*> [id]
+
+    concr = toInt . id2Concr eng
+    recen = toInt . ruleRecency wm eng
+
+    getWithMaxPrio = fst . maximumBy (comparing snd) .
+                       map (\ id -> (id, getPrio id)) . DS.toList 
+
 
 -- Forward Inferrence mode --
 
@@ -226,33 +228,79 @@ type InfState r = MaybeT (ReaderT Engine (StateT (WorkMem, CycleCounter) IO)) r
 toInfState :: Maybe a -> InfState a
 toInfState = MaybeT . return
 
+fwdGetCycleCount :: InfState CycleCounter
+fwdGetCycleCount = do (_, c) <- get
+                      return c
+
+fwdConflict :: InfState (DS.Set RuleId)
+fwdConflict = do eng     <- ask
+                 (wm, _) <- get
+                 return $ conflictSet wm eng (activeSet wm eng)
+                 
+fwdRuleToFire :: DS.Set RuleId -> InfState Rule
+fwdRuleToFire rs = do eng <- ask
+                      (wm, _) <- get
+                      return $ id2Rule eng $ getIdToFire wm eng rs
+
+fwdFireRule :: Rule -> InfState ()
+fwdFireRule (ant :=> suc) =
+  do (wm, c) <- get
+     let antM = DM.fromList $ zip ant $ repeat $ Recency 0
+         m'   = wmFact2Recency wm DM.\\ antM
+         m''  = DM.insert suc (Recency c) m'
+         wm'  = WorkMem m''
+     put (wm', c)
+     
+fwdPrintRulesByIds :: DS.Set RuleId -> InfState ()
+fwdPrintRulesByIds rIDs =
+  do eng <- ask
+     liftIO $ printRules $ map (id2Rule eng) $ DS.toList rIDs
+     
+fwdPrintWorkMem :: InfState ()
+fwdPrintWorkMem = do (wm, _) <- get
+                     liftIO $ printWorkMem wm
+     
+fwdIncCounter :: InfState ()
+fwdIncCounter = do (wm, c) <- get
+                   put (wm, c + 1)
+        
 fwdMode :: InfState ()
-fwdMode = do eng     <- ask
-             (wm, c) <- get
+fwdMode = do c <- fwdGetCycleCount
+
+             when (c == 1) $
+               liftIO $ putStrLn "Start."
+
              liftIO $ putStrLn $ "Forward Mode. Step " ++ show c ++ ";\n"
              
-             let relRs = DS.toList $ relatedRules wm eng
-                 srtRs = sortRules wm eng relRs
-             liftIO $ putStrLn "Related Rules (ordered):"
-             liftIO $ printRules $ map (id2Rule eng) srtRs
-             liftIO $ putStrLn ""
+             cnfRs <- fwdConflict
              
-             (rId, r,  wm') <- toInfState $ firstApplicable wm eng srtRs
-             liftIO $ putStrLn $ "Firing Rule:"
-             liftIO $ printRule r
-             liftIO $ putStrLn ""
+             liftIO $ putStrLn "Conflict Set:"
+             fwdPrintRulesByIds cnfRs
+             liftIO $ putStr "\n"
              
-             let wm'' = WorkMem $ DM.insert (ruleConcl r) (Recency c) $ wmFact2Recency wm'
-             liftIO $ putStrLn $ "Working Memory:"
-             liftIO $ printWorkMem wm''
-             liftIO $ putStrLn "\n"
-             
-             put (wm'', c + 1)
-             fwdMode
+             if DS.null cnfRs
+               then do liftIO $ putStrLn "Conflict set is empty. Result:"
+                       fwdPrintWorkMem
+                                 
+               else do r <- fwdRuleToFire cnfRs   
+                       
+                       liftIO $ do putStrLn "Firing Rule:"
+                                   printRule r
+                                   putStr "\n"
+                       
+                       fwdFireRule r
+                       
+                       fwdPrintWorkMem
+                       liftIO $ putStr "\n\n"
+               
+                       fwdIncCounter        
+                       fwdMode
          
-runFwdMode :: WorkMem -> Engine -> IO (WorkMem, CycleCounter)
-runFwdMode wm eng = fmap snd $ runStateT (runReaderT (runMaybeT fwdMode) eng) (wm, 1)
+runFwdMode :: WorkMem -> Engine -> IO (Maybe (), (WorkMem, CycleCounter))
+runFwdMode wm eng = runStateT (runReaderT (runMaybeT fwdMode) eng) (wm, 1)
 
+
+{- toString like functions -}
 
 showFacts :: [Fact] -> String
 showFacts fs =
@@ -274,18 +322,76 @@ showRules [] = "-- \\\\ --"
 showRules rs = intercalate ";\n" $ map showRule rs
 
 showWorkMem :: WorkMem -> String
-showWorkMem = intercalate ";\n" . map (\ (f, r) -> show f ++ "; " ++ show r) . DM.toList . wmFact2Recency
-
+showWorkMem = ("Working Memory:\n" ++) .
+  intercalate ";\n" .
+    map (\ (f, r) -> factInd ++ show f ++ "; " ++ show r) .
+      DM.toList . wmFact2Recency
+  where
+    factIndLen = 2
+    factInd = replicate factIndLen ' '
+    
 printWorkMem = putStrLn . showWorkMem
 printRules   = putStrLn . showRules
 printRule    = putStrLn . showRule
+--printFact    = putStrLn . showFact
+printFacts   = putStrLn . showFacts
     
 --------------------------------------------------------------
 {- Backward inferrence mode -}
 
+conflictRules :: Engine -> Fact -> [RuleId]
+conflictRules eng goal =
+  case lookupIdsByGoal eng goal of
+    Nothing -> []
+    Just rs -> DS.toList rs
 
+bwdConflict :: Fact -> InfState [Rule]
+bwdConflict goal = do eng <- ask
+                      return $ map (id2Rule eng) $ conflictRules eng goal
+
+bwdSubGoals :: Fact -> InfState [[Fact]]
+bwdSubGoals goal = do rs  <- bwdConflict goal
+                      eng <- ask
+                      return $ map ruleCondt rs 
+
+bwdProveGoals :: [Fact] -> InfState ()
+bwdProveGoals = sequence_ . map bwdMode
+
+bwdProveSubGoals :: [[Fact]] -> InfState ()
+bwdProveSubGoals = msum . map bwdProveGoals
+
+bwdMode :: Fact -> InfState ()
+bwdMode goal = do (wm, c) <- get
+                  liftIO $ do putStrLn $ "Backward Mode."
+                              putStrLn $ "Proving " ++ show goal ++ ";"
+                              putStr "\n"
+                  if hasFact wm goal
+                    then liftIO $ putStrLn $ show goal ++ " has been found in working memory. Proved. Exit.\n"
+                    else do cnfRs <- bwdConflict goal
+                            liftIO $ do putStrLn "Rules to achive goal:"
+                                        printRules cnfRs
+                                        putStr "\n"
+                            let subGs = map ruleCondt cnfRs
+                            liftIO $ do putStrLn "Subgoals:"
+                                        printSubGoals subGs
+                                        putStr "\n"
+                                        
+                            when (null subGs) $
+                              liftIO $ putStrLn "No subgoals to prove found. Abort."
+                              
+                            bwdProveSubGoals subGs
+                            liftIO $ do putStrLn $ show goal ++ " has been proven by subgoals:"
+                                        printSubGoals subGs
+                                        putStrLn "\nExit backward mode."
+
+runBwdMode :: WorkMem -> Engine -> Fact -> IO (Maybe (), (WorkMem, CycleCounter))
+runBwdMode wm eng goal = runStateT (runReaderT (runMaybeT (bwdMode goal)) eng) (wm, 1)
+
+printSubGoals [] = putStrLn "-- \\\\ --"
+printSubGoals gs = sequence_ $ map printFacts gs
 
 --------------------------------------------------------------
+-- auxiliary class for casting `Int`s newtypes
 class IntLike n where
   toInt :: n -> Int
   
@@ -308,7 +414,7 @@ exmRules =
   , [Fact "Animal can walk", Fact "Animal can talk"] :=> Fact "Animal is human"
   , [Fact "Animal can walk"] :=> Fact "Animal is on land" ]
   
-exmFacts = [Fact "Animal can walk", Fact "Animal is mammal"]
+exmFacts = [Fact "Animal can sweam", Fact "Animal is bird"]
 
 exmWM  = initWorkMem exmFacts
 exmENG = initEngine exmRules
