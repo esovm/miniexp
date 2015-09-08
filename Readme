@@ -1,1 +1,16 @@
 Colleague Work: implementation of mini expert system
+
+In terminal type
+
+  runFwdMode exmWM exmENG
+  
+    -- to run forward mode on
+        exmWM  -- example working memory
+        exmENG -- example inference engine
+        
+  runFwdMode exmWM exmENG (Fact "Animal is penguin")
+  
+    -- to prove that animal is penguin. To prove something
+       else, replace "Animal is penguin" by something else.
+       But you should change `exmWM` (and maybe `exmENG`)
+       in order to prove it.
