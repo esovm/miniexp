@@ -11,6 +11,6 @@ In terminal type
   runFwdMode exmWM exmENG (Fact "Animal is penguin")
   
     -- to prove that animal is penguin. To prove something
-       else, replace "Animal is penguin" by something else.
+       else, replace "Animal is penguin" by your statement.
        But you should change `exmWM` (and maybe `exmENG`)
-       in order to prove it.
+       in order to prove it too.
