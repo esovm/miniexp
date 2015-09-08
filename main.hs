@@ -54,9 +54,7 @@ ruleConcl (_ :=> concl) = concl
 
     4) If there is no rule to apply, then
     inferrence terminates.
-    
-    5) Order in which rules are applied is following:
-    most concrete and most recent rules are preffered.
+
 -}
 
 -- Concreteness
