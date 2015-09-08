@@ -1,6 +1,6 @@
 Colleague Work: implementation of mini expert system
 
-In terminal type
+In GHCi type
 
   runFwdMode exmWM exmENG
   
