@@ -11,7 +11,8 @@ import Data.Ord
 import Debug.Trace
 
 import Control.Monad.State
-import Control.Monad.Trans
+import Control.Monad.Trans.Maybe
+import Control.Monad.Reader
 
 import Control.Applicative
 -- -- -- -- -- -- -- -- -- -- -- -- -- --*
@@ -95,11 +96,11 @@ data Engine =
 
 --
 id2Rule :: Engine -> RuleId -> Rule
-id2Rule eng rId = (engId2Rule eng) DV.! rId
+id2Rule eng rId = (engId2Rule eng) DV.! (toInt rId)
 
 --
 id2Concr :: Engine -> RuleId -> Concr
-id2Concr eng rId = (engId2Concr eng) DV.! rId
+id2Concr eng rId = (engId2Concr eng) DV.! (toInt rId)
 
 --
 fact2ids :: Engine -> Fact -> DS.Set RuleId
@@ -110,7 +111,7 @@ lookupIdsByFact eng f = DM.lookup f (engFact2Ids eng)
 
 --
 rule2id :: Engine -> Rule -> RuleId
-rule2id eng rId = (engRule2Id eng) DM.! rId
+rule2id eng r = (engRule2Id eng) DM.! r
 
 initEngine :: [Rule] -> Engine
 initEngine rs = let
@@ -122,7 +123,7 @@ initEngine rs = let
   in Engine i2r i2c f2is r2i
   where
     
-    idxRs = zip rs [0..] 
+    idxRs = zip rs $ map RuleId [0..] 
     
     initFact2Ids =
       let idxFs = map (\ (r, i) -> (ruleCondt r, i)) idxRs
@@ -149,11 +150,6 @@ newtype Recency = Recency Int
 -- Working memory
 newtype WorkMem =
   WorkMem { wmFact2Recency :: DM.Map Fact Recency }
-  
-printWorkMem :: WorkMem -> IO ()
-printWorkMem (WorkMem f2r) =
-  do putStrLn "Woorking Memory:"
-     putStrLn ("Facts and their recency:\n" ++ show f2r)
   
 initWorkMem :: [Fact] -> WorkMem
 initWorkMem fs = WorkMem $ DM.fromList $ zip fs $ repeat $ Recency 0
@@ -182,22 +178,114 @@ ruleRecency wm eng rId = combine $
 relatedRules wm eng = DS.unions $ catMaybes $
   workMemFacts wm >>= pure . lookupIdsByFact eng
   
+  
+  
 -- Sorts rules in descending order by comparing
 -- a sum of rule's recency and concreteness.
 -- Most concrete and recent rule comes first.
 sortRules :: WorkMem -> Engine -> [RuleId] -> [RuleId]
-sortRules wm eng = sortDesc . map getScore
+sortRules wm eng rIds= map fst $ sortDesc $ zip rIds $ map getScore rIds
+  where 
+  
+    sortDesc = sortBy (flip $ comparing snd)
+ 
+    getScore id = sum $
+      [toInt . id2Concr eng, toInt . ruleRecency wm eng] <*> [id]
+    
+-- Tries to apply rule (by id). If possible,
+-- returns a Working Memory without rule's
+-- condition.
+tryApply :: WorkMem -> Engine -> RuleId -> Maybe (RuleId, Rule, WorkMem)
+tryApply (WorkMem f2r) eng rId =
+  let r    = id2Rule eng rId
+      cnd  = ruleCondt r
+      f2rs = removeCnd cnd
+      in case span isJust f2rs of
+           (js, []) -> fmap (\ x -> (rId, r, WorkMem x)) $ head js
+           _        -> Nothing
   where
- 
-    sortDesc = sortBy (flip compare)
- 
-    getScore id = sum $ [toInt . id2Concr eng, toInt . ruleRecency wm eng] <*> [id]
+  
+    del _ _ = Nothing
+    
+    removeCnd = scanr (\ f mF2r ->
+                  do f2r <- mF2r
+                     case DM.updateLookupWithKey del f f2r of
+                       (Nothing, _)   -> Nothing
+                       (Just _, f2r') -> return f2r') (Just f2r)
     
     
+firstApplicable :: WorkMem -> Engine -> [RuleId] -> Maybe (RuleId, Rule, WorkMem)
+firstApplicable wm eng = msum . map (tryApply wm eng)
+
+-- Forward Inferrence mode --
+
+type CycleCounter = Int
+
+type InfState r = MaybeT (ReaderT Engine (StateT (WorkMem, CycleCounter) IO)) r
+
+toInfState :: Maybe a -> InfState a
+toInfState = MaybeT . return
+
+fwdMode :: InfState ()
+fwdMode = do eng     <- ask
+             (wm, c) <- get
+             liftIO $ putStrLn $ "Forward Mode. Step " ++ show c ++ ";\n"
+             
+             let relRs = DS.toList $ relatedRules wm eng
+                 srtRs = sortRules wm eng relRs
+             liftIO $ putStrLn "Related Rules (ordered):"
+             liftIO $ printRules $ map (id2Rule eng) srtRs
+             liftIO $ putStrLn ""
+             
+             (rId, r,  wm') <- toInfState $ firstApplicable wm eng srtRs
+             liftIO $ putStrLn $ "Firing Rule:"
+             liftIO $ printRule r
+             liftIO $ putStrLn ""
+             
+             let wm'' = WorkMem $ DM.insert (ruleConcl r) (Recency c) $ wmFact2Recency wm'
+             liftIO $ putStrLn $ "Working Memory:"
+             liftIO $ printWorkMem wm''
+             liftIO $ putStrLn "\n"
+             
+             put (wm'', c + 1)
+             fwdMode
+         
+runFwdMode :: WorkMem -> Engine -> IO (WorkMem, CycleCounter)
+runFwdMode wm eng = fmap snd $ runStateT (runReaderT (runMaybeT fwdMode) eng) (wm, 1)
+
+
+showFacts :: [Fact] -> String
+showFacts fs =
+  let (h, t) = splitAt 1 $ map show fs
+      t'     = map (' ':) t
+      in between "[" "]" $ intercalate ",\n" $ h ++ t'
+  where
+    between l r m = l ++ m ++ r
+
+showRule :: Rule -> String
+showRule (ant :=> suc) =
+  showFacts ant ++ "\n" ++ conclInd ++ ":=> " ++ show suc
+  where
+    conclIndLen = 4
+    conclInd = replicate conclIndLen ' '
     
+showRules :: [Rule] -> String
+showRules [] = "-- \\\\ --"
+showRules rs = intercalate ";\n" $ map showRule rs
+
+showWorkMem :: WorkMem -> String
+showWorkMem = intercalate ";\n" . map (\ (f, r) -> show f ++ "; " ++ show r) . DM.toList . wmFact2Recency
+
+printWorkMem = putStrLn . showWorkMem
+printRules   = putStrLn . showRules
+printRule    = putStrLn . showRule
     
 --------------------------------------------------------------
+{- Backward inferrence mode -}
 
+
+
+--------------------------------------------------------------
 class IntLike n where
   toInt :: n -> Int
   
@@ -214,12 +302,13 @@ instance IntLike RuleId where
 {- Examples -}
     
 exmRules =
-  [ [Fact "Animal has tail", Fact "Animal says Meow"] :=> Fact "Animal is cat"
-  , [Fact "Animal like lizard", Fact "Animal is big"] :=> Fact "Animal is aligator"
-  , [Fact "Object can talk"] :=> Fact "Object is human"
-  , [Fact "Object can talk", Fact "Animal says Meow"] :=> Fact "Strange"]
+  [ [Fact "Animal can sweam", Fact "Animal is big", Fact "Animal is mammal"] :=> Fact "Animal is whale"
+  , [Fact "Animal can sweam", Fact "Animal is bird"] :=> Fact "Animal is penguin"
+  , [Fact "Animal can walk", Fact "Animal has fur", Fact "Animal is big", Fact "Animal is mammal"] :=> Fact "Object is bear"
+  , [Fact "Animal can walk", Fact "Animal can talk"] :=> Fact "Animal is human"
+  , [Fact "Animal can walk"] :=> Fact "Animal is on land" ]
   
-exmFacts = [Fact "Object can talk"]
+exmFacts = [Fact "Animal can walk", Fact "Animal is mammal"]
 
 exmWM  = initWorkMem exmFacts
 exmENG = initEngine exmRules
